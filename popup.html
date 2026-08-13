@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      width: 330px;
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #fffdf8;
+      color: #1f2430;
+    }
+    .head { padding: 14px 16px 10px; border-bottom: 3px solid #e8720c; }
+    .head h1 { margin: 0; font-size: 15px; font-weight: 700; }
+    .head p { margin: 4px 0 0; font-size: 12px; color: #8a8577; }
+    .body { padding: 12px 16px 16px; font-size: 12.5px; }
+    fieldset { border: none; margin: 0; padding: 0; }
+    legend { font-size: 12px; font-weight: 700; padding: 0 0 6px; }
+    .opt {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 8px 10px; border: 1px solid #e9e4da; border-radius: 8px;
+      margin-bottom: 6px; cursor: pointer;
+    }
+    .opt:has(input:checked) { border-color: #e8720c; background: #fdf3e7; }
+    .opt input { margin-top: 2px; accent-color: #e8720c; }
+    .opt b { font-size: 12.5px; }
+    .opt small { display: block; color: #8a8577; line-height: 1.45; margin-top: 1px; }
+
+    .fallback-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 10px; margin: 4px 0 10px;
+      background: #f5f1e8; border-radius: 8px; font-size: 12px;
+    }
+    .fallback-row input { accent-color: #e8720c; }
+
+    .advanced-toggle {
+      background: none; border: none; padding: 4px 0; margin: 2px 0 0;
+      color: #8a8577; font-size: 11.5px; font-weight: 600; text-align: left;
+      cursor: pointer; width: auto;
+    }
+    .advanced-toggle:hover { color: #1f2430; background: none; }
+    #bhashiniCreds { margin: 6px 0 10px; padding: 10px; background: #f5f1e8; border-radius: 8px; }
+    #bhashiniCreds.hidden { display: none; }
+    label { display: block; font-size: 11.5px; font-weight: 600; margin: 6px 0 3px; }
+    input[type="text"], input[type="password"] {
+      width: 100%; box-sizing: border-box; padding: 7px 9px;
+      border: 1px solid #e9e4da; border-radius: 6px;
+      font-size: 12px; font-family: ui-monospace, monospace; background: #fff;
+    }
+    input:focus { outline: 2px solid #e8720c; outline-offset: 1px; }
+    .cred-hint { font-size: 11px; color: #8a8577; line-height: 1.5; margin-top: 6px; }
+    .cred-hint a { color: #e8720c; }
+
+    button {
+      margin-top: 4px; width: 100%; padding: 9px; border: none; border-radius: 6px;
+      background: #1f2430; color: #fffdf8; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: #e8720c; }
+    .status { margin-top: 7px; font-size: 12px; min-height: 15px; }
+    .status.ok { color: #1b7a43; }
+    .status.err { color: #a4322a; }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <h1>CDAC AnuvaadMitra</h1>
+    <p>Select text → click अ→हि, or right-click → Translate</p>
+  </div>
+  <div class="body">
+    <fieldset>
+      <legend>Translation engine</legend>
+
+      <label class="opt">
+        <input type="radio" name="engine" value="auto" checked />
+        <span><b>Auto (recommended)</b>
+          <small>Tries C-DAC Pune → Bhashini → Google, in that order. Works immediately, no setup needed.</small></span>
+      </label>
+
+      <label class="opt">
+        <input type="radio" name="engine" value="bhashini" />
+        <span><b>Bhashini (Govt. of India)</b>
+          <small>MeitY's national translation API — IndicTrans models. Pre-configured, ready to use.</small></span>
+      </label>
+
+      <label class="opt">
+        <input type="radio" name="engine" value="cdacPune" />
+        <span><b>C-DAC Pune</b>
+          <small>C-DAC's own in-house translation API.</small></span>
+      </label>
+
+      <label class="opt">
+        <input type="radio" name="engine" value="google" />
+        <span><b>Google Translate</b>
+          <small>Free web endpoint, no key needed.</small></span>
+      </label>
+    </fieldset>
+
+    <label class="fallback-row" id="fallbackRow">
+      <input type="checkbox" id="autoFallback" checked />
+      <span>If the selected engine fails, automatically try the others</span>
+    </label>
+
+    <button type="button" id="advancedToggle" class="advanced-toggle">Advanced: translation server ▾</button>
+    <div id="bhashiniCreds" class="hidden">
+      <div class="cred-hint" style="margin-top:0;">
+        Bhashini and C-DAC Pune are served through C-DAC's translation server —
+        no keys are stored in your browser. Leave this blank to use the default
+        server. Only change it if you run your own.
+      </div>
+      <label for="proxyUrl">Translation server URL <span style="font-weight:400;color:#8a8577;">(optional)</span></label>
+      <input type="text" id="proxyUrl" autocomplete="off" placeholder="Using C-DAC's default server" />
+    </div>
+
+    <button id="save">Save settings</button>
+    <div class="status" id="status"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

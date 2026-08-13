@@ -1,0 +1,16 @@
+{
+  "name": "anuvaadmitra-proxy",
+  "version": "1.0.0",
+  "description": "Credential-holding translation proxy for the CDAC AnuvaadMitra Chrome extension (Bhashini + C-DAC Pune).",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "private": true
+}
