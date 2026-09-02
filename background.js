@@ -3,32 +3,51 @@
 // and automatic fallback through the others on failure.
 //
 // ============================================================================
-// CREDENTIAL / PROXY MODEL (read before deploying to the Chrome Web Store)
+// CREDENTIAL / PROXY MODEL (read before deploying)
 // ----------------------------------------------------------------------------
 // A Chrome extension's source is fully readable by anyone who installs it, so
-// NO secret (Bhashini User ID / Udyat Key, or any other API credential) may be
-// shipped inside this bundle. Those credentials now live ONLY on a small proxy
-// server that C-DAC controls. The extension talks to that proxy over a clean,
-// credential-free JSON API; the proxy injects the real Bhashini credentials
-// and forwards the request upstream.
+// shipping a secret (Bhashini User ID / Udyat Key) inside this bundle exposes
+// it. The INTENDED design is a small proxy server that C-DAC controls: the
+// extension talks to that proxy over a clean, credential-free JSON API and the
+// proxy injects the real Bhashini credentials server-side. Configure it via
+// DEFAULT_PROXY_BASE below (and match it in manifest.json -> host_permissions).
 //
-// Configure the proxy host in ONE place: DEFAULT_PROXY_BASE below (and match it
-// in manifest.json -> host_permissions). Advanced users can override it at
-// runtime via the popup (stored as `proxyBaseUrl`).
+//   POST {base}/api/translate       req {engine, text}          -> {translation}
+//   POST {base}/api/transliterate   req {text, numSuggestions}  -> {candidates}
 //
-// Expected proxy API (implement server-side; see PROXY-SETUP note in README):
-//   POST {base}/api/translate
-//     req  : { "engine": "bhashini" | "cdac", "text": "..." }
-//     resp : { "translation": "..." }            (HTTP 200)
-//   POST {base}/api/transliterate
-//     req  : { "text": "...", "numSuggestions": 6 }
-//     resp : { "candidates": ["...", "..."] }     (HTTP 200)
-// Non-200 responses should carry a short { "error": "..." } body when possible.
+// ---------------------------------------------------------------------------
+// DIRECT-CALL FALLBACK (INTERNAL / SIDELOADED BUILDS ONLY)
+// ---------------------------------------------------------------------------
+// When DEFAULT_PROXY_BASE is "" (no proxy deployed yet), the extension talks to
+// the upstream APIs directly:
+//   * C-DAC Pune  -> nlpsangraha.ebhasha.in (no auth)
+//   * Bhashini    -> ULCA config call + Dhruva compute call, using the
+//                    credentials in the BHASHINI_* constants below.
+//
+// WARNING: the direct Bhashini path embeds your credentials in this file, which
+// every installed copy can read. This is acceptable ONLY for internal /
+// sideloaded distribution to trusted machines. Do NOT publish a build with
+// filled-in BHASHINI_* constants to the Chrome Web Store — deploy the proxy for
+// any public/wide distribution and leave these blank.
 // ============================================================================
 
-// Replace with C-DAC's deployed proxy host. Must also appear in
-// manifest.json -> host_permissions. Leave without a trailing slash.
-const DEFAULT_PROXY_BASE = "https://anuvaadmitra.cdac.in";
+// Leave "" until the proxy is deployed. When set, ALL Bhashini + C-DAC Pune
+// calls route through the proxy and the direct paths below are not used.
+// Must also appear in manifest.json -> host_permissions. No trailing slash.
+const DEFAULT_PROXY_BASE = "";
+
+// ---- Direct Bhashini credentials (fill locally; copy from your 5.16.1 build) ----
+// These are only consulted when DEFAULT_PROXY_BASE is "" (internal builds).
+const BHASHINI_USER_ID     = "1285b2f88ac94de7af87d0d53ea58962";
+const BHASHINI_ULCA_API_KEY = "22067923f1-1936-4f79-b8ff-ad3721830daa";
+// Pipeline ID for your registered app (cdac_hindi_translator). The MeitY public
+// EN<->Indic pipeline below works for en->hi translation + transliteration;
+// replace it with your own registered pipeline ID if you have one.
+const BHASHINI_PIPELINE_ID = "64392f96daac500b55c543cd";
+
+// ULCA pipeline-config endpoint (returns the inference endpoint + auth token).
+const BHASHINI_CONFIG_URL =
+  "https://meity-auth.ulcacontrib.org/ulca/apis/v0/model/getModelsPipeline";
 
 async function getProxyBase() {
   const { proxyBaseUrl } = await chrome.storage.sync.get({ proxyBaseUrl: "" });
@@ -157,15 +176,16 @@ async function googleTranslate(text) {
   return hindi;
 }
 
-// ================= Engine: Bhashini (via C-DAC proxy) =================
-// The proxy holds the Bhashini credentials and performs the ULCA pipeline
-// (config + compute) server-side. The extension only sends the text.
+// ================= Engine: Bhashini =================
+// Routed through the proxy when one is configured; otherwise calls the ULCA /
+// Dhruva pipeline directly using the BHASHINI_* credentials (internal builds).
 async function bhashiniTranslate(text) {
   const base = await getProxyBase();
-  if (!base) {
-    throw new Error("translation service not configured — set the proxy URL in the extension popup");
-  }
+  return base ? bhashiniViaProxy(base, text) : bhashiniDirect(text);
+}
 
+// ---- Bhashini via proxy (credential-free; proxy runs the ULCA pipeline) ----
+async function bhashiniViaProxy(base, text) {
   let response;
   try {
     response = await fetch(`${base}/api/translate`, {
@@ -183,6 +203,122 @@ async function bhashiniTranslate(text) {
 
   const data = await response.json();
   const hindi = (data?.translation || "").trim();
+  if (!hindi) throw new Error("empty response");
+  return hindi;
+}
+
+// ---- Direct Bhashini (INTERNAL BUILDS ONLY — credentials are in this file) ----
+//
+// Two-step ULCA flow:
+//   1. Config call  -> gives us the inference endpoint (callbackUrl), an auth
+//      header (name/value) and the serviceId for the task.
+//   2. Compute call -> hits that endpoint with the auth header and the text.
+// The config result is stable per task, so we cache it in memory and only
+// re-fetch it if it's missing or a compute call reports an auth failure.
+const bhashiniConfigCache = {}; // { translation: {...}, transliteration: {...} }
+
+function bhashiniCredsPresent() {
+  return (
+    BHASHINI_USER_ID && !BHASHINI_USER_ID.startsWith("PASTE_") &&
+    BHASHINI_ULCA_API_KEY && !BHASHINI_ULCA_API_KEY.startsWith("PASTE_")
+  );
+}
+
+async function getBhashiniPipeline(taskType) {
+  if (bhashiniConfigCache[taskType]) return bhashiniConfigCache[taskType];
+
+  if (!bhashiniCredsPresent()) {
+    throw new Error("credentials not set in background.js (internal build)");
+  }
+
+  let response;
+  try {
+    response = await fetch(BHASHINI_CONFIG_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        userID: BHASHINI_USER_ID,
+        ulcaApiKey: BHASHINI_ULCA_API_KEY
+      },
+      body: JSON.stringify({
+        pipelineTasks: [
+          {
+            taskType,
+            config: { language: { sourceLanguage: "en", targetLanguage: "hi" } }
+          }
+        ],
+        pipelineRequestConfig: { pipelineId: BHASHINI_PIPELINE_ID }
+      })
+    });
+  } catch (_) {
+    throw new Error("config call unreachable — check network/VPN");
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`config auth rejected (HTTP ${response.status}) — check User ID / Udyat Key`);
+  }
+  if (!response.ok) {
+    throw new Error(`config call failed (HTTP ${response.status})`);
+  }
+
+  const data = await response.json();
+  const endpoint = data?.pipelineInferenceAPIEndPoint;
+  const taskConfig = data?.pipelineResponseConfig?.find(
+    (c) => c.taskType === taskType
+  )?.config?.[0];
+
+  if (!endpoint?.callbackUrl || !endpoint?.inferenceApiKey?.name || !taskConfig?.serviceId) {
+    throw new Error("unexpected config response shape");
+  }
+
+  const resolved = {
+    callbackUrl: endpoint.callbackUrl,
+    authName: endpoint.inferenceApiKey.name,
+    authValue: endpoint.inferenceApiKey.value,
+    serviceId: taskConfig.serviceId
+  };
+  bhashiniConfigCache[taskType] = resolved;
+  return resolved;
+}
+
+async function bhashiniDirect(text) {
+  const p = await getBhashiniPipeline("translation");
+
+  let response;
+  try {
+    response = await fetch(p.callbackUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", [p.authName]: p.authValue },
+      body: JSON.stringify({
+        pipelineTasks: [
+          {
+            taskType: "translation",
+            config: {
+              language: { sourceLanguage: "en", targetLanguage: "hi" },
+              serviceId: p.serviceId
+            }
+          }
+        ],
+        inputData: { input: [{ source: text }] }
+      })
+    });
+  } catch (_) {
+    throw new Error("unreachable — check network/VPN");
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    delete bhashiniConfigCache.translation; // token may have rotated — force re-config next time
+    throw new Error(`auth rejected (HTTP ${response.status})`);
+  }
+  if (!response.ok) {
+    throw new Error(`request failed (HTTP ${response.status})`);
+  }
+
+  const data = await response.json();
+  const hindi = (
+    data?.pipelineResponse?.find((r) => r.taskType === "translation")
+      ?.output?.[0]?.target || ""
+  ).trim();
   if (!hindi) throw new Error("empty response");
   return hindi;
 }
@@ -332,14 +468,16 @@ function extractCdacTranslation(data) {
 
 // ================= Bhashini Transliteration (word-suggestion feature) =================
 // Suggests Devanagari spellings for a word typed phonetically in Roman script
-// (e.g. "mera" -> मेरा/मीरा/...). Like translation, this now goes through the
-// proxy, which runs Bhashini's Transliteration pipeline server-side.
+// (e.g. "mera" -> मेरा/मीरा/...). Routes through the proxy when configured;
+// otherwise calls Bhashini's Transliteration pipeline directly (internal builds).
 async function bhashiniTransliterate(romanWord) {
   const base = await getProxyBase();
-  if (!base) {
-    throw new Error("suggestion service not configured — set the proxy URL in the extension popup");
-  }
+  return base
+    ? bhashiniTransliterateViaProxy(base, romanWord)
+    : bhashiniTransliterateDirect(romanWord);
+}
 
+async function bhashiniTransliterateViaProxy(base, romanWord) {
   let response;
   try {
     response = await fetch(`${base}/api/transliterate`, {
@@ -358,6 +496,53 @@ async function bhashiniTransliterate(romanWord) {
   const data = await response.json();
   const candidates = Array.isArray(data?.candidates)
     ? data.candidates.filter((c) => typeof c === "string" && c.trim())
+    : [];
+  if (!candidates.length) throw new Error("no suggestions found");
+  return candidates;
+}
+
+// ---- Direct Bhashini transliteration (INTERNAL BUILDS ONLY) ----
+async function bhashiniTransliterateDirect(romanWord) {
+  const p = await getBhashiniPipeline("transliteration");
+
+  let response;
+  try {
+    response = await fetch(p.callbackUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", [p.authName]: p.authValue },
+      body: JSON.stringify({
+        pipelineTasks: [
+          {
+            taskType: "transliteration",
+            config: {
+              language: { sourceLanguage: "en", targetLanguage: "hi" },
+              serviceId: p.serviceId,
+              isSentence: false,
+              numSuggestions: 6
+            }
+          }
+        ],
+        inputData: { input: [{ source: romanWord }] }
+      })
+    });
+  } catch (_) {
+    throw new Error("suggestion service unreachable — check network/VPN");
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    delete bhashiniConfigCache.transliteration;
+    throw new Error(`auth rejected (HTTP ${response.status})`);
+  }
+  if (!response.ok) {
+    throw new Error(`suggestion request failed (HTTP ${response.status})`);
+  }
+
+  const data = await response.json();
+  const target =
+    data?.pipelineResponse?.find((r) => r.taskType === "transliteration")
+      ?.output?.[0]?.target;
+  const candidates = Array.isArray(target)
+    ? target.filter((c) => typeof c === "string" && c.trim())
     : [];
   if (!candidates.length) throw new Error("no suggestions found");
   return candidates;
