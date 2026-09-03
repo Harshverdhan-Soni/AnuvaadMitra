@@ -12,9 +12,31 @@ order; each ends with a **Checkpoint** you can verify before moving on.
 
 ## 0. Where things stand (already done)
 
-The codebase is prepared for public listing:
+> ## ⚠ There are TWO builds of this extension. Do not confuse them.
+>
+> - **Internal build** (currently in daily use): `DEFAULT_PROXY_BASE = ""`, with
+>   the real Bhashini **User ID** and **Udyat Key** filled into the `BHASHINI_*`
+>   constants in `background.js`, plus direct ULCA config+compute code
+>   (`getBhashiniPipeline`, `bhashiniDirect`, `bhashiniTransliterateDirect`).
+>   This is fine for **internal / sideloaded** distribution to trusted machines
+>   but **MUST NEVER be published** — its credentials are readable by anyone who
+>   installs it.
+> - **Public build** (what this guide produces): **proxy-only**. No `BHASHINI_*`
+>   constants, no direct-Bhashini code; credentials live only on the proxy
+>   server. This is the `background.public.js` file — rename it to
+>   `background.js` in the public build folder and use it for everything below.
+>
+> The `background.js` on your machine right now is the **internal** build.
+> Before Phase 3, swap in the credential-free public `background.js` so the file
+> you package is the public one. **Setting the proxy host does not neutralise
+> embedded credentials** — even when the proxy path is the one that runs,
+> credentials left in the source are still readable by anyone who installs the
+> extension. The only safe public build is one with no credentials in it at all.
 
-- Hardcoded Bhashini credentials removed from the extension.
+The public codebase is prepared for listing:
+
+- **No Bhashini credentials in the extension** — they live only on the proxy
+  server. (True of the public `background.js`; **not** of the internal build.)
 - Bhashini and C-DAC Pune calls route through a configurable proxy
   (`background.js` → `DEFAULT_PROXY_BASE`; `manifest.json` → `host_permissions`).
 - Popup exposes an optional proxy-URL override; no keys are stored in the browser.
@@ -24,8 +46,8 @@ The codebase is prepared for public listing:
 - Submission-form text drafted (`store-submission.md`).
 - Packaging scripts written (`build/`).
 
-**What remains** is operational: deploy the proxy, point the extension at it,
-host the privacy policy, prepare assets, register, package, submit.
+**What remains** is operational: deploy the proxy, point the (public) extension
+at it, host the privacy policy, prepare assets, register, package, submit.
 
 ---
 
@@ -40,9 +62,11 @@ host the privacy policy, prepare assets, register, package, submit.
       (e.g. `[anuvaadmitra-support@cdac.in]`).
 - [ ] Node.js 18+ on your local machine (to run the packaging script) — or use
       the PowerShell script instead.
+- [ ] The credential-free public `background.js` (`background.public.js`) on hand,
+      kept separate from the internal build so the two are never mixed up.
 
 **Checkpoint:** you have a server hostname, the Bhashini credentials, a Google
-account, and a contact email in hand.
+account, a contact email, and the credential-free public `background.js` in hand.
 
 ---
 
@@ -104,17 +128,34 @@ $ curl -X POST https://[your-host]/api/translate \
 
 ## 3. Point the extension at the proxy
 
+> **First: confirm you are editing the PUBLIC, credential-free `background.js`,
+> not the internal build.** The public file has no `BHASHINI_*` credential
+> constants and none of the direct-Bhashini functions (`getBhashiniPipeline`,
+> `bhashiniDirect`, `bhashiniTransliterateDirect`). If you see real values in
+> `BHASHINI_*` constants, you are in the wrong file — replace it with the
+> credential-free version before continuing.
+
 The proxy host must match in **two** files.
 
 1. `background.js`:
    ```js
    const DEFAULT_PROXY_BASE = "https://[your-host]";
    ```
-2. `manifest.json` → `host_permissions`:
+2. `manifest.json` → `host_permissions` — this must list **only** the proxy host
+   (plus the Google Translate host the extension already needs). Do **not**
+   include `meity-auth.ulcacontrib.org`, `dhruva-api.bhashini.gov.in`, or
+   `nlpsangraha.ebhasha.in`: in the public build those upstream APIs are called
+   **server-side by the proxy**, never by the browser. Requesting host
+   permissions the extension doesn't use is both misleading and a review risk —
+   unnecessary broad permissions lengthen review (see Phase 9).
    ```json
    "https://[your-host]/*"
    ```
    (Replace the placeholder `anuvaadmitra.cdac.in` entry.)
+
+> If you added `meity-auth.ulcacontrib.org`, `dhruva-api.bhashini.gov.in`, or
+> `nlpsangraha.ebhasha.in` to `host_permissions` while testing the internal
+> build, **remove them now** for the public build.
 
 ### 3.1 Test locally (unpacked)
 1. Open `chrome://extensions`.
@@ -126,7 +167,8 @@ The proxy host must match in **two** files.
    and confirm each returns a translation.
 
 **Checkpoint:** all three engines translate correctly through the deployed proxy
-in a locally loaded copy.
+in a locally loaded copy — and the loaded copy is the credential-free public
+build.
 
 ---
 
@@ -191,9 +233,25 @@ This creates `dist/anuvaadmitra-v5.17.0.zip` containing only the runtime files
 (`manifest.json` at the root, JS/CSS/HTML, `icons/`). The script aborts if it
 detects a leftover credential.
 
-**Checkpoint:** `dist/anuvaadmitra-v5.17.0.zip` exists; if you open it, it
-contains the manifest at the top level and no `proxy-server/`, `privacy-policy/`,
-docs, or `.git`.
+> **⚠ Verify the credential guard actually catches the internal build — this is
+> the single most important safety gate in the whole process.** The guard
+> predates the internal credentialed build, so confirm it greps for the current
+> markers and aborts on any of them:
+> - the constant names `BHASHINI_USER_ID`, `BHASHINI_ULCA_API_KEY`,
+>   `BHASHINI_PIPELINE_ID`;
+> - the direct-call function names `getBhashiniPipeline`, `bhashiniDirect`,
+>   `bhashiniTransliterateDirect`;
+> - the ULCA config host `meity-auth.ulcacontrib.org` appearing in `background.js`.
+>
+> As a one-off sanity check, run the packaging script against the **internal**
+> `background.js` and confirm it **REFUSES** to build. If it produces a ZIP from
+> the internal file, the guard is not protecting you — fix the guard before
+> trusting this step. Then run it against the public build for the real package.
+
+**Checkpoint:** the guard rejects the internal build; `dist/anuvaadmitra-v5.17.0.zip`
+is produced from the **public** build, contains the manifest at the top level, and
+contains no `proxy-server/`, `privacy-policy/`, docs, `.git`, or any `BHASHINI_*`
+credential.
 
 ---
 
@@ -209,7 +267,10 @@ tab, using the paste-ready text in `store-submission.md`:
 ### 8.2 Privacy tab
 - **Single purpose** — paste from `store-submission.md` §1.
 - **Permission justifications** — paste each from §2 (`storage`, `contextMenus`,
-  each host permission, and the `<all_urls>`/all-frames content-script access).
+  the proxy host permission, and the `<all_urls>`/all-frames content-script
+  access). Note: with the public build you justify **only the proxy host**, not
+  the upstream Bhashini/C-DAC hosts — keep the justification text consistent with
+  the trimmed `host_permissions` from Phase 3.
 - **Remote code** — select **No** (§3).
 - **Data usage / Privacy practices** — disclose **Website content** only; do not
   check the other categories. Tick the three certifications (§4).
@@ -262,12 +323,17 @@ the listing URL and in `chrome://extensions`).
 
 For any future change:
 
-1. Make the code change.
+1. Make the code change **in the public build** (never merge the internal build's
+   credentials in).
 2. Increment `version` in `manifest.json` (e.g. `5.17.0` → `5.17.1`).
-3. Re-run the packaging script.
+3. Re-run the packaging script (and confirm the credential guard still passes).
 4. In the dashboard, open the item → **Package** → upload the new ZIP →
    **Submit for review**.
 5. Commit and push the change to the repo.
+
+> Keep the internal credentialed build on a separate branch/folder (and out of any
+> published ZIP) so the two never converge. If you ever need Bhashini working
+> without the proxy again, use the internal build for sideloading only.
 
 ---
 
@@ -280,12 +346,15 @@ For any future change:
 
 ## Master checklist
 
+- [ ] **Public (credential-free) `background.js` in place — internal build NOT packaged**
 - [ ] Proxy deployed, HTTPS, `/healthz` = `bhashiniConfigured:true`
 - [ ] Extension points at the proxy (both files), tested locally, all engines work
+- [ ] `host_permissions` trimmed to the proxy host (+ Google); upstream API hosts removed
+- [ ] Packaging script's credential guard verified to REJECT the internal build
 - [ ] Privacy policy placeholders filled and hosted at a public URL
 - [ ] Listing assets ready (icon, screenshot, descriptions)
 - [ ] Developer account registered, US$5 paid
-- [ ] Package built from `build/` script (runtime files only)
+- [ ] Package built from `build/` script (runtime files only, no credentials)
 - [ ] Submission form completed from `store-submission.md`
 - [ ] Submitted for review → published
 - [ ] `ALLOWED_ORIGINS` locked to the published extension ID

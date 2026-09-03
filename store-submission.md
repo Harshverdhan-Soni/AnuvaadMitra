@@ -35,11 +35,14 @@ Paste one justification per declared permission.
 > This is C-DAC's translation proxy. The extension sends the user's selected text
 > here to obtain a translation from the C-DAC Pune and Bhashini engines. The
 > proxy holds the API credentials server-side so they are not exposed in the
-> extension. (Replace with your actual deployed proxy host if different.)
+> extension, and it makes the upstream calls to Bhashini and C-DAC Pune on the
+> server side — so the extension itself only ever contacts this proxy and Google.
+> (Replace with your actual deployed proxy host if different.)
 
-### Host permission — `https://nlpsangraha.ebhasha.in/*`
-> Endpoint for the C-DAC Pune translation engine, used as a direct fallback path
-> to translate the user's selected English text into Hindi.
+> Note: the public build does **not** request host permissions for
+> `meity-auth.ulcacontrib.org`, `dhruva-api.bhashini.gov.in`, or
+> `nlpsangraha.ebhasha.in`. Those upstream APIs are called by the proxy
+> server-side, so justify only the proxy host above and the Google host.
 
 ### Content script host access — `<all_urls>` with `all_frames`
 > The extension's core function is to translate text the user selects on any web
@@ -101,15 +104,24 @@ Ensure the Privacy Practices selections above match the privacy policy wording.
 
 ## 6. Pre-submission checklist
 
-- [ ] Replace the proxy host placeholder in `background.js` (`DEFAULT_PROXY_BASE`)
-      and `manifest.json` (`host_permissions`) with the real deployed HTTPS host.
+- [ ] Package the PUBLIC build (`background.public.js`), never the credentialed
+      internal `background.js`. The `build/` script does this automatically and
+      aborts if it detects an internal-build marker — do not bypass it.
+- [ ] Replace the proxy host placeholder in `background.public.js`
+      (`DEFAULT_PROXY_BASE`) and `manifest.json` (`host_permissions`) with the
+      real deployed HTTPS host.
+- [ ] Confirm `manifest.json` host_permissions lists only the proxy host and
+      Google — no `meity-auth`, `dhruva-api`, or `nlpsangraha`.
 - [ ] Deploy the proxy (`proxy-server/`) and confirm `/healthz` responds.
 - [ ] Fill placeholders in the privacy policy (contact email, effective date) and
       host it at a public URL.
 - [ ] Lock the proxy's `ALLOWED_ORIGINS` to the published extension ID after the
       first upload (the ID is assigned on upload).
 - [ ] Build the upload ZIP from extension files only — exclude `proxy-server/`,
-      `privacy-policy/`, `store-submission.md`, `README.md`, `.git/`, `.gitignore`.
+      `privacy-policy/`, `store-submission.md`, `README.md`, `DEPLOYMENT-GUIDE.*`,
+      `build/`, `.git/`, `.gitignore`, and the internal `background.js`. (The
+      `build/` script already ships `background.public.js` as `background.js` and
+      excludes the rest.)
 - [ ] Prepare listing assets: 128×128 icon, at least one 1280×800 (or 640×400)
       screenshot of the translation card in action, short + detailed description.
 - [ ] Pay the one-time US$5 developer registration fee (per account) if not done.

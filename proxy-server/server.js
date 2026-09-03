@@ -93,6 +93,14 @@ app.use((req, res, next) => {
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // Private Network Access: when the extension (a secure context) calls this
+  // proxy on a private/LAN IP over plain HTTP, Chrome sends a preflight with
+  // `Access-Control-Request-Private-Network: true` and requires this response
+  // header to permit it. Needed for internal HTTP-to-IP testing; harmless in
+  // public HTTPS deployment.
+  if (req.headers["access-control-request-private-network"]) {
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+  }
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });

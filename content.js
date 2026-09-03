@@ -145,6 +145,18 @@
   // "Insert" only makes sense when the original text was selected inside an
   // editable area (a compose box, contenteditable note, etc.) — not on a
   // plain, read-only webpage where there's nowhere valid to insert into.
+  // Some rich-text editors (notably TinyMCE 4, used by OX App Suite / Open-
+  // Xchange webmail) make an <iframe> editable via document-level
+  // `designMode = "on"` rather than per-element `contentEditable`. In that
+  // case `element.isContentEditable` is false everywhere, so the checks below
+  // would wrongly conclude there's nowhere to insert. Detect the editable
+  // document directly. (The content script runs inside the editor iframe, so
+  // `ownerDocument` here is that iframe's document.)
+  function isDesignModeDoc(node) {
+    const doc = node && (node.ownerDocument || (node.nodeType === Node.DOCUMENT_NODE ? node : null));
+    return !!(doc && typeof doc.designMode === "string" && doc.designMode.toLowerCase() === "on");
+  }
+
   function isInsideEditable(node) {
     let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
     while (el) {
@@ -157,6 +169,9 @@
       }
       el = el.parentElement;
     }
+    // designMode iframe editors (TinyMCE 4 / OX App Suite): the whole document
+    // is editable even though no element reports isContentEditable.
+    if (isDesignModeDoc(node)) return true;
     return false;
   }
 
@@ -173,6 +188,13 @@
         break; // left the editable chain — the last editable ancestor found is the root
       }
       el = el.parentElement;
+    }
+    // designMode iframe editors (TinyMCE 4 / OX App Suite): no element reports
+    // isContentEditable, so fall back to the editable document's body as the
+    // insertion root.
+    if (!root && isDesignModeDoc(node)) {
+      const doc = node.ownerDocument || (node.nodeType === Node.DOCUMENT_NODE ? node : document);
+      root = doc.body || doc.documentElement;
     }
     return root;
   }

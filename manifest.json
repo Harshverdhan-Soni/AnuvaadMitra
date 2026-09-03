@@ -3,12 +3,11 @@
   "name": "CDAC AnuvaadMitra",
   "description": "CDAC AnuvaadMitra: select English text on any page and get a Hindi translation ready to copy. Choose Bhashini, C-DAC Pune, or Google Translate, with automatic fallback.",
   "version": "5.17.0",
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "119",
   "permissions": ["storage", "contextMenus"],
   "host_permissions": [
     "https://translate.googleapis.com/*",
-    "https://anuvaadmitra.cdac.in/*",
-    "https://nlpsangraha.ebhasha.in/*"
+    "https://anuvaadmitra.cdac.in/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -17,6 +16,7 @@
     {
       "matches": ["<all_urls>"],
       "all_frames": true,
+      "match_origin_as_fallback": true,
       "js": ["content.js"],
       "css": ["content.css"]
     }

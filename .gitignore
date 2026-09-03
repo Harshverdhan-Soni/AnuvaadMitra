@@ -17,6 +17,8 @@ npm-debug.log*
 *.crx
 *.pem
 web-ext-artifacts/
+dist/
+dist-internal/
 
 # ---- OS / editor cruft ----
 .DS_Store
@@ -26,3 +28,8 @@ desktop.ini
 .idea/
 *.swp
 *.docx
+~$*
+# scratch render previews (safe to delete)
+.gp*.jpg
+.gg*.jpg
+.preview*.jpg

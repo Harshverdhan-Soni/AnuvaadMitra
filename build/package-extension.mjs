@@ -2,16 +2,23 @@
 // ============================================================================
 // package-extension.mjs
 // Build a clean, review-safe Chrome Web Store upload ZIP containing ONLY the
-// extension runtime files. Everything else (proxy server, docs, privacy policy,
-// git metadata, build tooling) is excluded.
+// PUBLIC (credential-free) extension runtime files.
+//
+// IMPORTANT — TWO BUILDS:
+//   * Internal build  = background.js       (embeds BHASHINI_* credentials +
+//                        direct ULCA/Dhruva calls; SIDELOAD ONLY, never publish)
+//   * Public build    = background.public.js (proxy-only, no credentials)
+// This script packages the PUBLIC build: it ships background.public.js AS
+// background.js and refuses to build if any internal-build credential marker is
+// present in the files being packaged.
 //
 // Usage:
 //   node build/package-extension.mjs
 // Output:
 //   dist/anuvaadmitra-v<version>.zip   (version read from manifest.json)
 //
-// Requires Node.js 18+. No external dependencies — shells out to the system
-// `zip` on macOS/Linux, or PowerShell's Compress-Archive on Windows.
+// Requires Node.js 18+. Shells out to the system `zip` (macOS/Linux) or
+// PowerShell's Compress-Archive (Windows).
 // ============================================================================
 
 import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, readdirSync, statSync } from "node:fs";
@@ -24,29 +31,42 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");              // the extension/ folder
 const DIST = join(ROOT, "dist");
 
-// Only these top-level entries are shipped. Add here if you add real runtime
-// files (e.g. an options page). Keep everything else OUT.
+// Files to ship. Each entry is { src, dest }: `src` is the repo path, `dest` is
+// the name inside the ZIP. The PUBLIC background source is renamed to
+// background.js so the manifest's service_worker resolves.
 const INCLUDE = [
-  "manifest.json",
-  "background.js",
-  "content.js",
-  "content.css",
-  "popup.html",
-  "popup.js",
-  "icons"
+  { src: "manifest.json",        dest: "manifest.json" },
+  { src: "background.public.js", dest: "background.js" },   // PUBLIC build only
+  { src: "content.js",           dest: "content.js" },
+  { src: "content.css",          dest: "content.css" },
+  { src: "popup.html",           dest: "popup.html" },
+  { src: "popup.js",             dest: "popup.js" },
+  { src: "icons",                dest: "icons" }
 ];
 
-// Sanity: things that must never end up in the package.
-const FORBIDDEN = [
-  "proxy-server",
-  "privacy-policy",
-  ".git",
-  ".gitignore",
-  "build",
-  "dist",
-  "node_modules",
-  "store-submission.md",
-  "README.md"
+// Internal-build credential markers. If ANY of these appear in a file being
+// packaged, the build is aborted — this is the primary safety gate that stops
+// the credentialed internal build from ever being published.
+const CREDENTIAL_MARKERS = [
+  "BHASHINI_USER_ID",
+  "BHASHINI_ULCA_API_KEY",
+  "BHASHINI_ULCA_KEY",
+  "BHASHINI_PIPELINE_ID",
+  "getBhashiniPipeline",
+  "bhashiniDirect",
+  "bhashiniTransliterateDirect",
+  "meity-auth.ulcacontrib.org",
+  "dhruva-api.bhashini.gov.in",
+  "1285b2f88ac94de7",          // old hardcoded user id (defence in depth)
+  "22067923f1-1936"            // old hardcoded udyat key
+];
+
+// Upstream API hosts that must NOT appear in the public manifest's
+// host_permissions (the proxy calls them server-side).
+const FORBIDDEN_MANIFEST_HOSTS = [
+  "meity-auth.ulcacontrib.org",
+  "dhruva-api.bhashini.gov.in",
+  "nlpsangraha.ebhasha.in"
 ];
 
 function fail(msg) {
@@ -57,43 +77,48 @@ function fail(msg) {
 // --- Read version from manifest ---
 const manifestPath = join(ROOT, "manifest.json");
 if (!existsSync(manifestPath)) fail("manifest.json not found — run from the extension folder.");
-const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const manifestText = readFileSync(manifestPath, "utf8");
+const manifest = JSON.parse(manifestText);
 const version = manifest.version || "0.0.0";
 
-// --- Verify every required file exists ---
-const missing = INCLUDE.filter((p) => !existsSync(join(ROOT, p)));
-if (missing.length) fail(`Missing required file(s): ${missing.join(", ")}`);
+// --- Verify every required source exists ---
+const missing = INCLUDE.filter((e) => !existsSync(join(ROOT, e.src)));
+if (missing.length) fail(`Missing required file(s): ${missing.map((e) => e.src).join(", ")}`);
 
-// --- Guard: fail loudly if any forbidden path sneaks into INCLUDE ---
-const leaked = INCLUDE.filter((p) => FORBIDDEN.includes(p));
-if (leaked.length) fail(`INCLUDE lists forbidden path(s): ${leaked.join(", ")}`);
+// --- Guard: the public background source must exist and be the public one ---
+if (!existsSync(join(ROOT, "background.public.js"))) {
+  fail("background.public.js not found — the credential-free public build source is required.");
+}
 
-// --- Secret scan across the files we're about to ship ---
+// --- Manifest host_permissions must not include upstream API hosts ---
+const hostPerms = manifest.host_permissions || [];
+const badHosts = hostPerms.filter((h) => FORBIDDEN_MANIFEST_HOSTS.some((f) => h.includes(f)));
+if (badHosts.length) {
+  fail(`manifest.json host_permissions includes upstream API host(s) that the public build must not request: ${badHosts.join(", ")}. In the public build these are called by the proxy server-side.`);
+}
+
+// --- Credential scan across every file we're about to ship ---
 function walk(p) {
   const st = statSync(p);
   if (st.isDirectory()) return readdirSync(p).flatMap((c) => walk(join(p, c)));
   return [p];
 }
-const shipFiles = INCLUDE.flatMap((p) => walk(join(ROOT, p)));
-const secretPatterns = [
-  /1285b2f88ac94de7/,               // old hardcoded Bhashini user id
-  /22067923f1-1936/,                // old hardcoded Udyat key
-  /ulcaApiKey\s*:\s*["'][^"']+["']/, // any inline ULCA key
-  /BHASHINI_ULCA_KEY\s*=\s*\S/       // any baked env secret
-];
+const shipFiles = INCLUDE.flatMap((e) => walk(join(ROOT, e.src)));
 for (const f of shipFiles) {
   if (/\.(png|jpg|jpeg|gif|webp|ico)$/i.test(f)) continue; // skip binaries
   const text = readFileSync(f, "utf8");
-  for (const re of secretPatterns) {
-    if (re.test(text)) fail(`Possible secret found in ${f.replace(ROOT, ".")} — aborting. Pattern: ${re}`);
+  for (const marker of CREDENTIAL_MARKERS) {
+    if (text.includes(marker)) {
+      fail(`Internal-build marker "${marker}" found in ${f.replace(ROOT, ".")} — this looks like the credentialed internal build. Aborting: never publish the internal build.`);
+    }
   }
 }
 
-// --- Stage into a temp dir, then zip ---
+// --- Stage into a temp dir (applying the rename map), then zip ---
 const stage = join(tmpdir(), `anuvaadmitra-pkg-${Date.now()}`);
 mkdirSync(stage, { recursive: true });
-for (const p of INCLUDE) {
-  cpSync(join(ROOT, p), join(stage, p), { recursive: true });
+for (const e of INCLUDE) {
+  cpSync(join(ROOT, e.src), join(stage, e.dest), { recursive: true });
 }
 
 mkdirSync(DIST, { recursive: true });
@@ -103,11 +128,9 @@ if (existsSync(outPath)) rmSync(outPath);
 
 try {
   if (platform() === "win32") {
-    // PowerShell Compress-Archive: zip the staged CONTENTS (note the \*).
     const psCmd = `Compress-Archive -Path '${stage}\\*' -DestinationPath '${outPath}' -Force`;
     execFileSync("powershell", ["-NoProfile", "-Command", psCmd], { stdio: "inherit" });
   } else {
-    // `zip -r <out> .` from inside the stage dir so paths are relative.
     execFileSync("zip", ["-r", "-X", outPath, "."], { cwd: stage, stdio: "inherit" });
   }
 } catch (e) {
@@ -117,6 +140,7 @@ try {
 }
 
 const sizeKb = (statSync(outPath).size / 1024).toFixed(1);
-console.log(`\n✓ Built ${join("dist", outName)} (${sizeKb} KB)`);
-console.log(`  Version ${version} · included: ${INCLUDE.join(", ")}`);
+console.log(`\n✓ Built ${join("dist", outName)} (${sizeKb} KB) — PUBLIC build`);
+console.log(`  Shipped background.public.js as background.js; no credentials present.`);
+console.log(`  Version ${version} · included: ${INCLUDE.map((e) => e.dest).join(", ")}`);
 console.log("  Upload this ZIP to the Chrome Web Store Developer Dashboard.\n");
