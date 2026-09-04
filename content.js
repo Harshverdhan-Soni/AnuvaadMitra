@@ -594,6 +594,48 @@
     return frag;
   }
 
+  // Some rich-text editors (CKEditor 5, ProseMirror, Quill, Slate, Draft.js,
+  // Lexical, etc.) keep their own internal document MODEL and re-render the
+  // editable DOM from it. If we mutate their DOM directly (Range.insertNode),
+  // the inserted nodes live outside that model, so the editor treats them as
+  // foreign content: it often becomes impossible to edit or delete, and it can
+  // be stripped on the next change. Detect these so we can insert through the
+  // editor's own input pipeline instead.
+  const MODEL_EDITOR_SELECTOR =
+    ".ck-editor__editable, .ck-content, .ProseMirror, .ql-editor, [data-slate-editor], .public-DraftEditor-content, [data-lexical-editor]";
+  function findModelEditorHost(node) {
+    const el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    if (!el || !el.closest) return null;
+    return el.closest(MODEL_EDITOR_SELECTOR); // matches self or an ancestor
+  }
+
+  // Inserts text at the current caret by driving the editor's native input
+  // pipeline via execCommand("insertText"). This fires the `beforeinput`
+  // events model-based editors listen to, so the text enters their model and
+  // stays fully editable/deletable. Multi-line text is inserted paragraph by
+  // paragraph. Returns true only if the editor's content actually grew.
+  function insertIntoModelEditor(hostEl, text) {
+    try { hostEl.focus(); } catch (_) {}
+    const pageSelection = window.getSelection();
+    const caret = document.createRange();
+    caret.setStart(hostEl, 0); // very start of the editor
+    caret.collapse(true);
+    pageSelection.removeAllRanges();
+    pageSelection.addRange(caret);
+
+    const before = (hostEl.textContent || "").length;
+    const lines = text.split(/\r?\n/);
+    lines.forEach((line, idx) => {
+      if (idx > 0) document.execCommand("insertParagraph");
+      if (line) document.execCommand("insertText", false, line);
+    });
+    // Trailing break so the inserted text sits above any existing content
+    // rather than merging into the same paragraph.
+    document.execCommand("insertParagraph");
+
+    return (hostEl.textContent || "").length > before;
+  }
+
   // Inserts the current translation at the very start of the editable area
   // — position (0,0) of the editor, not at the position of the original
   // English selection — so it always lands at the top of whatever the user
@@ -620,20 +662,37 @@
         const root = findEditableRoot(anchorNode);
         if (!root) throw new Error("no editable root found");
 
-        const insertRange = document.createRange();
-        insertRange.setStart(root, 0); // the very beginning of the editor's content
-        insertRange.collapse(true);
+        // Model-based editors (CKEditor 5, ProseMirror, Quill, …) must be fed
+        // through their own input pipeline, otherwise the inserted text becomes
+        // un-editable/un-deletable. Try that first; fall back to direct DOM
+        // insertion (which works for Gmail, designMode iframes, and plain
+        // contenteditable) only if it didn't take.
+        const modelHost = findModelEditorHost(anchorNode);
+        let insertedViaModel = false;
+        if (modelHost) {
+          try {
+            insertedViaModel = insertIntoModelEditor(modelHost, liveText);
+          } catch (_) {
+            insertedViaModel = false;
+          }
+        }
 
-        const frag = buildLineBreakFragment(liveText, true);
-        const lastNode = frag.lastChild;
-        insertRange.insertNode(frag);
+        if (!insertedViaModel) {
+          const insertRange = document.createRange();
+          insertRange.setStart(root, 0); // the very beginning of the editor's content
+          insertRange.collapse(true);
 
-        const after = document.createRange();
-        after.setStartAfter(lastNode);
-        after.collapse(true);
-        const pageSelection = window.getSelection();
-        pageSelection.removeAllRanges();
-        pageSelection.addRange(after);
+          const frag = buildLineBreakFragment(liveText, true);
+          const lastNode = frag.lastChild;
+          insertRange.insertNode(frag);
+
+          const after = document.createRange();
+          after.setStartAfter(lastNode);
+          after.collapse(true);
+          const pageSelection = window.getSelection();
+          pageSelection.removeAllRanges();
+          pageSelection.addRange(after);
+        }
       }
 
       if (insertBtnEl) {
