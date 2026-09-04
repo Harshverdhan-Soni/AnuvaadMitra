@@ -619,8 +619,16 @@
   // handler reads it and inserts through the model, so the text stays fully
   // editable/deletable. `execCommand` is kept only as a secondary fallback.
   // Returns true only if the editor's content actually grew.
-  function insertIntoModelEditor(hostEl, text) {
+  function insertIntoModelEditor(hostEl, text, onDone) {
     try { hostEl.focus(); } catch (_) {}
+
+    // Collapse the caret to the very START of the editor so the text is INSERTED
+    // there, not pasted over whatever the user had selected. The collapse has to
+    // take effect in the editor's own model, and model-based editors sync their
+    // model selection from the DOM selection asynchronously (via the document
+    // `selectionchange` event). So we set the collapsed DOM caret now and fire
+    // the paste on the next tick, once that sync has happened — otherwise the
+    // paste lands on the still-selected English and replaces it.
     const pageSelection = window.getSelection();
     const caret = document.createRange();
     caret.setStart(hostEl, 0); // very start of the editor
@@ -630,42 +638,86 @@
 
     const before = (hostEl.textContent || "").length;
 
-    // Primary: synthetic paste. text/html carries <br> line breaks so multi-line
-    // text survives; text/plain is the fallback the editor uses if it prefers it.
-    try {
-      const dt = new DataTransfer();
-      dt.setData("text/plain", text);
-      dt.setData(
-        "text/html",
-        text.split(/\r?\n/).map((l) => (l ? escapeHtml(l) : "")).join("<br>")
-      );
-      const pasteEvt = new ClipboardEvent("paste", {
-        bubbles: true,
-        cancelable: true,
-        clipboardData: dt,
-      });
-      hostEl.dispatchEvent(pasteEvt);
-    } catch (_) {
-      /* fall through to execCommand */
-    }
-    if ((hostEl.textContent || "").length > before) return true;
+    setTimeout(() => {
+      let grew = false;
 
-    // Secondary: native input pipeline via execCommand("insertText"), which
-    // fires the `beforeinput` events some editors also honour. Inserted
-    // paragraph by paragraph so line breaks are preserved.
-    const lines = text.split(/\r?\n/);
-    lines.forEach((line, idx) => {
-      if (idx > 0) document.execCommand("insertParagraph");
-      if (line) document.execCommand("insertText", false, line);
-    });
+      // Primary: synthetic paste. text/html carries <br> line breaks so
+      // multi-line text survives; text/plain is the fallback the editor uses if
+      // it prefers it. Routes through the editor's clipboard pipeline, so the
+      // text enters the model at the (now collapsed) caret and stays editable.
+      try {
+        const dt = new DataTransfer();
+        dt.setData("text/plain", text);
+        dt.setData(
+          "text/html",
+          text.split(/\r?\n/).map((l) => (l ? escapeHtml(l) : "")).join("<br>")
+        );
+        hostEl.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt,
+          })
+        );
+        grew = (hostEl.textContent || "").length > before;
+      } catch (_) {
+        /* fall through to execCommand */
+      }
 
-    return (hostEl.textContent || "").length > before;
+      // Secondary: native input pipeline via execCommand("insertText"), which
+      // fires the `beforeinput` events some editors also honour.
+      if (!grew) {
+        const lines = text.split(/\r?\n/);
+        lines.forEach((line, idx) => {
+          if (idx > 0) document.execCommand("insertParagraph");
+          if (line) document.execCommand("insertText", false, line);
+        });
+        grew = (hostEl.textContent || "").length > before;
+      }
+
+      onDone(grew);
+    }, 0);
   }
 
   // Inserts the current translation at the very start of the editable area
   // — position (0,0) of the editor, not at the position of the original
   // English selection — so it always lands at the top of whatever the user
   // is composing, regardless of where in the text they made the selection.
+  // Direct DOM insertion at the start of a plain editable (Gmail, designMode
+  // iframes, plain contenteditable). Not for model-based editors — see
+  // insertIntoModelEditor.
+  function insertViaDomRange(root, text) {
+    const insertRange = document.createRange();
+    insertRange.setStart(root, 0); // the very beginning of the editor's content
+    insertRange.collapse(true);
+
+    const frag = buildLineBreakFragment(text, true);
+    const lastNode = frag.lastChild;
+    insertRange.insertNode(frag);
+
+    const after = document.createRange();
+    after.setStartAfter(lastNode);
+    after.collapse(true);
+    const pageSelection = window.getSelection();
+    pageSelection.removeAllRanges();
+    pageSelection.addRange(after);
+  }
+
+  // Locks the Insert button once text has landed, so the same text can't be
+  // inserted twice.
+  function markInsertDone(insertBtnEl, ok) {
+    if (!insertBtnEl) return;
+    if (ok) {
+      insertBtnEl.textContent = "Inserted ✓";
+      insertBtnEl.disabled = true;
+      insertBtnEl.title = "Already inserted";
+      insertBtnEl.style.cssText = INSERT_STYLE_INSERTED;
+      wireHover(insertBtnEl, INSERT_STYLE_INSERTED, INSERT_STYLE_INSERTED_HOVER);
+    } else {
+      insertBtnEl.textContent = "Insert failed — use Copy";
+    }
+  }
+
   function handleInsertClick() {
     if (!card || !canInsertHere || !originalSelectionRange) return;
     const insertBtnEl = card.querySelector(".e2h-insert-result");
@@ -684,52 +736,35 @@
         formControl.value = liveText + sep + formControl.value;
         formControl.focus();
         formControl.setSelectionRange(0, 0);
-      } else {
-        const root = findEditableRoot(anchorNode);
-        if (!root) throw new Error("no editable root found");
+        markInsertDone(insertBtnEl, true);
+        return;
+      }
 
-        // Model-based editors (CKEditor 5, ProseMirror, Quill, …) must be fed
-        // through their own input pipeline, otherwise the inserted text becomes
-        // un-editable/un-deletable. Try that first; fall back to direct DOM
-        // insertion (which works for Gmail, designMode iframes, and plain
-        // contenteditable) only if it didn't take.
-        const modelHost = findModelEditorHost(anchorNode);
-        let insertedViaModel = false;
-        if (modelHost) {
+      const root = findEditableRoot(anchorNode);
+      if (!root) throw new Error("no editable root found");
+
+      // Model-based editors (CKEditor 5, ProseMirror, Quill, …) must be fed
+      // through their own input pipeline, otherwise the inserted text becomes
+      // un-editable/un-deletable. That path is asynchronous (it waits a tick for
+      // the editor to sync its collapsed caret), so it reports back via callback.
+      // Fall back to direct DOM insertion only if it didn't take.
+      const modelHost = findModelEditorHost(anchorNode);
+      if (modelHost) {
+        insertIntoModelEditor(modelHost, liveText, (ok) => {
           try {
-            insertedViaModel = insertIntoModelEditor(modelHost, liveText);
+            if (!ok) insertViaDomRange(root, liveText);
+            markInsertDone(insertBtnEl, true);
           } catch (_) {
-            insertedViaModel = false;
+            markInsertDone(insertBtnEl, false);
           }
-        }
-
-        if (!insertedViaModel) {
-          const insertRange = document.createRange();
-          insertRange.setStart(root, 0); // the very beginning of the editor's content
-          insertRange.collapse(true);
-
-          const frag = buildLineBreakFragment(liveText, true);
-          const lastNode = frag.lastChild;
-          insertRange.insertNode(frag);
-
-          const after = document.createRange();
-          after.setStartAfter(lastNode);
-          after.collapse(true);
-          const pageSelection = window.getSelection();
-          pageSelection.removeAllRanges();
-          pageSelection.addRange(after);
-        }
+        });
+        return;
       }
 
-      if (insertBtnEl) {
-        insertBtnEl.textContent = "Inserted ✓";
-        insertBtnEl.disabled = true; // prevent inserting the same text twice
-        insertBtnEl.title = "Already inserted";
-        insertBtnEl.style.cssText = INSERT_STYLE_INSERTED;
-        wireHover(insertBtnEl, INSERT_STYLE_INSERTED, INSERT_STYLE_INSERTED_HOVER);
-      }
+      insertViaDomRange(root, liveText);
+      markInsertDone(insertBtnEl, true);
     } catch (_) {
-      if (insertBtnEl) insertBtnEl.textContent = "Insert failed — use Copy";
+      markInsertDone(insertBtnEl, false);
     }
   }
 
