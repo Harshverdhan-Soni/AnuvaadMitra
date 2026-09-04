@@ -609,11 +609,16 @@
     return el.closest(MODEL_EDITOR_SELECTOR); // matches self or an ancestor
   }
 
-  // Inserts text at the current caret by driving the editor's native input
-  // pipeline via execCommand("insertText"). This fires the `beforeinput`
-  // events model-based editors listen to, so the text enters their model and
-  // stays fully editable/deletable. Multi-line text is inserted paragraph by
-  // paragraph. Returns true only if the editor's content actually grew.
+  // Inserts text into a model-based editor (CKEditor 5, ProseMirror, Quill,
+  // Lexical, …). These editors own an internal document model and only accept
+  // content that arrives through their own input/clipboard pipeline; a native
+  // `document.execCommand` with a native Range does NOT sync to their model, so
+  // the insert silently no-ops (the symptom we saw: button flips to "Inserted"
+  // but nothing appears). The most compatible pipeline across all of them is a
+  // synthetic `paste` event carrying a DataTransfer — the editor's clipboard
+  // handler reads it and inserts through the model, so the text stays fully
+  // editable/deletable. `execCommand` is kept only as a secondary fallback.
+  // Returns true only if the editor's content actually grew.
   function insertIntoModelEditor(hostEl, text) {
     try { hostEl.focus(); } catch (_) {}
     const pageSelection = window.getSelection();
@@ -624,14 +629,35 @@
     pageSelection.addRange(caret);
 
     const before = (hostEl.textContent || "").length;
+
+    // Primary: synthetic paste. text/html carries <br> line breaks so multi-line
+    // text survives; text/plain is the fallback the editor uses if it prefers it.
+    try {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", text);
+      dt.setData(
+        "text/html",
+        text.split(/\r?\n/).map((l) => (l ? escapeHtml(l) : "")).join("<br>")
+      );
+      const pasteEvt = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt,
+      });
+      hostEl.dispatchEvent(pasteEvt);
+    } catch (_) {
+      /* fall through to execCommand */
+    }
+    if ((hostEl.textContent || "").length > before) return true;
+
+    // Secondary: native input pipeline via execCommand("insertText"), which
+    // fires the `beforeinput` events some editors also honour. Inserted
+    // paragraph by paragraph so line breaks are preserved.
     const lines = text.split(/\r?\n/);
     lines.forEach((line, idx) => {
       if (idx > 0) document.execCommand("insertParagraph");
       if (line) document.execCommand("insertText", false, line);
     });
-    // Trailing break so the inserted text sits above any existing content
-    // rather than merging into the same paragraph.
-    document.execCommand("insertParagraph");
 
     return (hostEl.textContent || "").length > before;
   }
